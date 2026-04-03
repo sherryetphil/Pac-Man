@@ -28,3 +28,4 @@ python3 -m http.server 8000
 - 吃到全部豆子即獲勝
 - 被鬼碰到會扣生命，生命歸零則遊戲結束
 # Pac-Man
+# Pac-Man
