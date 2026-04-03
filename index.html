@@ -1,0 +1,535 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>小精靈 Mini Game (Mac)</title>
+  <style>
+    :root {
+      --bg: #030712;
+      --panel: #0b1220;
+      --wall: #1d4ed8;
+      --wall-edge: #60a5fa;
+      --text: #e5e7eb;
+      --accent: #f59e0b;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background:
+        radial-gradient(circle at 20% 10%, #111827 0%, transparent 40%),
+        radial-gradient(circle at 90% 80%, #0f172a 0%, transparent 35%),
+        var(--bg);
+      color: var(--text);
+      font-family: "SF Pro Display", "PingFang TC", "Noto Sans TC", sans-serif;
+      padding: 16px;
+    }
+
+    .wrap {
+      width: min(96vw, 700px);
+      background: linear-gradient(180deg, #0b1220 0%, #060d1a 100%);
+      border: 1px solid #1f2937;
+      border-radius: 16px;
+      box-shadow: 0 18px 40px rgba(0, 0, 0, 0.45);
+      overflow: hidden;
+    }
+
+    .title {
+      padding: 12px 16px;
+      border-bottom: 1px solid #1f2937;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .title h1 {
+      margin: 0;
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: 0.2px;
+    }
+
+    .hint {
+      font-size: 12px;
+      color: #93c5fd;
+      text-align: right;
+      line-height: 1.4;
+    }
+
+    canvas {
+      width: 100%;
+      height: auto;
+      display: block;
+      background: #020617;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="title">
+      <h1>小精靈 Mini Game</h1>
+      <div class="hint">方向鍵 / WASD 移動 · P 暫停 · R 重開</div>
+    </div>
+    <canvas id="game" aria-label="Pac-Man game canvas"></canvas>
+  </div>
+
+  <script>
+    const TILE = 28;
+    const HUD_HEIGHT = 54;
+
+    const LEVEL_TEMPLATE = [
+      "#####################",
+      "#o........#........o#",
+      "#.####.###.#.###.####",
+      "#...................#",
+      "#.####.#.#####.#.####",
+      "#......#...#...#....#",
+      "######.###.#.###.####",
+      "#........#.#........#",
+      "#.####.#.#.#.#.####.#",
+      "#o...#.#.....#.#...o#",
+      "#.##.#.#######.#.##.#",
+      "#....#....#....#....#",
+      "####.###.#.#.###.####",
+      "#...........#.......#",
+      "#.#########.#.#####.#",
+      "#o.........#.......o#",
+      "#####################"
+    ];
+
+    const COLORS = {
+      pellet: "#f8fafc",
+      power: "#fde68a",
+      player: "#facc15",
+      ghost: ["#ef4444", "#ec4899", "#22d3ee", "#f97316"],
+      frightened: "#60a5fa"
+    };
+
+    const DIRS = {
+      left: { x: -1, y: 0, angle: Math.PI },
+      right: { x: 1, y: 0, angle: 0 },
+      up: { x: 0, y: -1, angle: -Math.PI / 2 },
+      down: { x: 0, y: 1, angle: Math.PI / 2 }
+    };
+
+    const KEY_TO_DIR = {
+      ArrowLeft: "left",
+      ArrowRight: "right",
+      ArrowUp: "up",
+      ArrowDown: "down",
+      a: "left",
+      d: "right",
+      w: "up",
+      s: "down"
+    };
+
+    const canvas = document.getElementById("game");
+    const ctx = canvas.getContext("2d");
+
+    const COLS = LEVEL_TEMPLATE[0].length;
+    const ROWS = LEVEL_TEMPLATE.length;
+
+    canvas.width = COLS * TILE;
+    canvas.height = ROWS * TILE + HUD_HEIGHT;
+
+    const centerOf = (tile) => tile * TILE + TILE / 2;
+    const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
+
+    let state;
+    let lastTime = 0;
+
+    function createLevel() {
+      return LEVEL_TEMPLATE.map(row => row.split(""));
+    }
+
+    function countPellets(level) {
+      let count = 0;
+      for (const row of level) {
+        for (const cell of row) {
+          if (cell === "." || cell === "o") count += 1;
+        }
+      }
+      return count;
+    }
+
+    function makePlayer() {
+      return {
+        spawn: { tx: 1, ty: 1 },
+        x: centerOf(1),
+        y: centerOf(1),
+        dir: "right",
+        nextDir: "right",
+        speed: 115,
+        radius: TILE * 0.38,
+        mouth: 0
+      };
+    }
+
+    function makeGhost(tx, ty, color) {
+      return {
+        spawn: { tx, ty },
+        x: centerOf(tx),
+        y: centerOf(ty),
+        dir: "left",
+        speed: 92,
+        baseSpeed: 92,
+        color,
+        radius: TILE * 0.38
+      };
+    }
+
+    function resetPositions() {
+      state.player = makePlayer();
+      state.ghosts = [
+        makeGhost(9, 7, COLORS.ghost[0]),
+        makeGhost(11, 7, COLORS.ghost[1]),
+        makeGhost(9, 9, COLORS.ghost[2]),
+        makeGhost(11, 9, COLORS.ghost[3])
+      ];
+      state.freeze = 1.1;
+    }
+
+    function newGame() {
+      const level = createLevel();
+      state = {
+        level,
+        pelletsLeft: countPellets(level),
+        score: 0,
+        lives: 3,
+        paused: false,
+        ended: false,
+        won: false,
+        powerTimer: 0,
+        freeze: 0,
+        message: ""
+      };
+      resetPositions();
+      state.message = "開始！";
+    }
+
+    function tileAt(tx, ty) {
+      if (tx < 0 || tx >= COLS || ty < 0 || ty >= ROWS) return "#";
+      return state.level[ty][tx];
+    }
+
+    function canEnter(tx, ty) {
+      return tileAt(tx, ty) !== "#";
+    }
+
+    function nearCenter(entity) {
+      const tx = Math.floor(entity.x / TILE);
+      const ty = Math.floor(entity.y / TILE);
+      return {
+        tx,
+        ty,
+        centered:
+          Math.abs(entity.x - centerOf(tx)) < 2 &&
+          Math.abs(entity.y - centerOf(ty)) < 2
+      };
+    }
+
+    function applyInput(entity) {
+      const info = nearCenter(entity);
+      if (!info.centered) return;
+
+      entity.x = centerOf(info.tx);
+      entity.y = centerOf(info.ty);
+
+      const next = DIRS[entity.nextDir];
+      if (next && canEnter(info.tx + next.x, info.ty + next.y)) {
+        entity.dir = entity.nextDir;
+      }
+
+      const current = DIRS[entity.dir];
+      if (!current || !canEnter(info.tx + current.x, info.ty + current.y)) {
+        entity.dir = null;
+      }
+    }
+
+    function moveEntity(entity, dt) {
+      if (!entity.dir) return;
+      const d = DIRS[entity.dir];
+      entity.x += d.x * entity.speed * dt;
+      entity.y += d.y * entity.speed * dt;
+
+      entity.x = clamp(entity.x, TILE / 2, COLS * TILE - TILE / 2);
+      entity.y = clamp(entity.y, TILE / 2, ROWS * TILE - TILE / 2);
+    }
+
+    function eatPellet() {
+      const tx = Math.floor(state.player.x / TILE);
+      const ty = Math.floor(state.player.y / TILE);
+      const cell = tileAt(tx, ty);
+
+      if (cell === ".") {
+        state.level[ty][tx] = " ";
+        state.score += 10;
+        state.pelletsLeft -= 1;
+      } else if (cell === "o") {
+        state.level[ty][tx] = " ";
+        state.score += 50;
+        state.pelletsLeft -= 1;
+        state.powerTimer = 7;
+      }
+
+      if (state.pelletsLeft <= 0) {
+        state.ended = true;
+        state.won = true;
+        state.message = "你贏了！按 R 再玩一次";
+      }
+    }
+
+    function chooseGhostDir(ghost) {
+      const info = nearCenter(ghost);
+      if (!info.centered) return;
+
+      ghost.x = centerOf(info.tx);
+      ghost.y = centerOf(info.ty);
+
+      const reverse = {
+        left: "right",
+        right: "left",
+        up: "down",
+        down: "up"
+      };
+
+      const options = [];
+      for (const name of Object.keys(DIRS)) {
+        const d = DIRS[name];
+        const nx = info.tx + d.x;
+        const ny = info.ty + d.y;
+        if (!canEnter(nx, ny)) continue;
+        if (reverse[ghost.dir] === name) continue;
+        options.push(name);
+      }
+
+      if (options.length === 0) {
+        const fallback = reverse[ghost.dir];
+        if (fallback) ghost.dir = fallback;
+        return;
+      }
+
+      if (state.powerTimer > 0) {
+        ghost.dir = options[Math.floor(Math.random() * options.length)];
+        return;
+      }
+
+      const playerTx = Math.floor(state.player.x / TILE);
+      const playerTy = Math.floor(state.player.y / TILE);
+
+      options.sort((a, b) => {
+        const da = DIRS[a];
+        const db = DIRS[b];
+        const aDist = Math.abs(info.tx + da.x - playerTx) + Math.abs(info.ty + da.y - playerTy);
+        const bDist = Math.abs(info.tx + db.x - playerTx) + Math.abs(info.ty + db.y - playerTy);
+
+        const noise = Math.random() < 0.22 ? (Math.random() - 0.5) * 4 : 0;
+        return aDist - bDist + noise;
+      });
+
+      ghost.dir = options[0];
+    }
+
+    function checkCollisions() {
+      for (const ghost of state.ghosts) {
+        const dx = state.player.x - ghost.x;
+        const dy = state.player.y - ghost.y;
+        const dist = Math.hypot(dx, dy);
+
+        if (dist < TILE * 0.55) {
+          if (state.powerTimer > 0) {
+            state.score += 200;
+            ghost.x = centerOf(ghost.spawn.tx);
+            ghost.y = centerOf(ghost.spawn.ty);
+            ghost.dir = "left";
+          } else {
+            state.lives -= 1;
+            if (state.lives <= 0) {
+              state.ended = true;
+              state.won = false;
+              state.message = "遊戲結束，按 R 重新開始";
+            } else {
+              resetPositions();
+              state.message = `剩餘生命：${state.lives}`;
+            }
+          }
+          break;
+        }
+      }
+    }
+
+    function update(dt) {
+      if (state.paused || state.ended) return;
+
+      if (state.freeze > 0) {
+        state.freeze -= dt;
+        if (state.freeze <= 0) state.message = "";
+        return;
+      }
+
+      state.powerTimer = Math.max(0, state.powerTimer - dt);
+
+      applyInput(state.player);
+      moveEntity(state.player, dt);
+      state.player.mouth += dt * 10;
+
+      for (const ghost of state.ghosts) {
+        ghost.speed = state.powerTimer > 0 ? ghost.baseSpeed * 0.72 : ghost.baseSpeed;
+        chooseGhostDir(ghost);
+        moveEntity(ghost, dt);
+      }
+
+      eatPellet();
+      checkCollisions();
+    }
+
+    function drawMap() {
+      for (let y = 0; y < ROWS; y += 1) {
+        for (let x = 0; x < COLS; x += 1) {
+          const cell = state.level[y][x];
+          const px = x * TILE;
+          const py = y * TILE;
+
+          if (cell === "#") {
+            ctx.fillStyle = "#1e3a8a";
+            ctx.fillRect(px + 1, py + 1, TILE - 2, TILE - 2);
+            ctx.strokeStyle = "#60a5fa";
+            ctx.lineWidth = 1.5;
+            ctx.strokeRect(px + 2, py + 2, TILE - 4, TILE - 4);
+          } else if (cell === ".") {
+            ctx.fillStyle = COLORS.pellet;
+            ctx.beginPath();
+            ctx.arc(px + TILE / 2, py + TILE / 2, 2.5, 0, Math.PI * 2);
+            ctx.fill();
+          } else if (cell === "o") {
+            const pulse = 4 + Math.sin(performance.now() / 160) * 1.2;
+            ctx.fillStyle = COLORS.power;
+            ctx.beginPath();
+            ctx.arc(px + TILE / 2, py + TILE / 2, pulse, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+      }
+    }
+
+    function drawPlayer() {
+      const p = state.player;
+      const angle = DIRS[p.dir || "right"].angle;
+      const mouthOpen = (Math.sin(p.mouth) + 1) * 0.18 + 0.08;
+
+      ctx.fillStyle = COLORS.player;
+      ctx.beginPath();
+      ctx.moveTo(p.x, p.y);
+      ctx.arc(
+        p.x,
+        p.y,
+        p.radius,
+        angle + mouthOpen,
+        angle + Math.PI * 2 - mouthOpen
+      );
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    function drawGhost(ghost) {
+      const frightened = state.powerTimer > 0;
+      const x = ghost.x;
+      const y = ghost.y;
+      const r = ghost.radius;
+
+      ctx.fillStyle = frightened ? COLORS.frightened : ghost.color;
+      ctx.beginPath();
+      ctx.arc(x, y - r * 0.1, r, Math.PI, 0);
+      ctx.lineTo(x + r, y + r * 0.95);
+
+      const wave = r * 0.4;
+      for (let i = 0; i < 3; i += 1) {
+        const wx = x + r - (i + 1) * ((r * 2) / 3);
+        ctx.quadraticCurveTo(wx + wave * 0.3, y + r * 0.55, wx, y + r * 0.95);
+      }
+      ctx.lineTo(x - r, y + r * 0.95);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.fillStyle = "white";
+      ctx.beginPath();
+      ctx.arc(x - r * 0.35, y - r * 0.15, r * 0.26, 0, Math.PI * 2);
+      ctx.arc(x + r * 0.35, y - r * 0.15, r * 0.26, 0, Math.PI * 2);
+      ctx.fill();
+
+      const look = DIRS[ghost.dir || "left"];
+      ctx.fillStyle = "#0f172a";
+      ctx.beginPath();
+      ctx.arc(x - r * 0.35 + look.x * 2, y - r * 0.15 + look.y * 2, r * 0.12, 0, Math.PI * 2);
+      ctx.arc(x + r * 0.35 + look.x * 2, y - r * 0.15 + look.y * 2, r * 0.12, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    function drawHud() {
+      const y = ROWS * TILE;
+      ctx.fillStyle = "#050b18";
+      ctx.fillRect(0, y, canvas.width, HUD_HEIGHT);
+
+      ctx.fillStyle = "#e2e8f0";
+      ctx.font = "16px SF Pro Display, PingFang TC, sans-serif";
+      ctx.fillText(`分數: ${state.score}`, 14, y + 22);
+      ctx.fillText(`生命: ${state.lives}`, 14, y + 44);
+
+      if (state.powerTimer > 0) {
+        ctx.fillStyle = "#93c5fd";
+        ctx.fillText(`無敵 ${state.powerTimer.toFixed(1)}s`, 140, y + 22);
+      }
+
+      ctx.fillStyle = state.ended ? "#fca5a5" : "#fef08a";
+      const msg = state.paused ? "已暫停 (P 繼續)" : state.message;
+      if (msg) {
+        ctx.fillText(msg, 260, y + 33);
+      }
+    }
+
+    function render() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      drawMap();
+      drawPlayer();
+      for (const ghost of state.ghosts) drawGhost(ghost);
+      drawHud();
+    }
+
+    function loop(ts) {
+      const dt = Math.min(0.033, (ts - lastTime) / 1000 || 0);
+      lastTime = ts;
+      update(dt);
+      render();
+      requestAnimationFrame(loop);
+    }
+
+    window.addEventListener("keydown", (event) => {
+      const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
+
+      if (KEY_TO_DIR[key]) {
+        state.player.nextDir = KEY_TO_DIR[key];
+        event.preventDefault();
+        return;
+      }
+
+      if (key === "r") {
+        newGame();
+        return;
+      }
+
+      if (key === "p") {
+        state.paused = !state.paused;
+      }
+    });
+
+    newGame();
+    requestAnimationFrame(loop);
+  </script>
+</body>
+</html>
